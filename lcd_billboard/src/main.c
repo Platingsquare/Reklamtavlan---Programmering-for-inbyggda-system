@@ -10,6 +10,7 @@
 // ============================================================================
 #define DISPLAY_DURATION_MS 20000  
 #define TICK_RATE_MS 1             
+#define SCROLL_STEP_MS 1100        
 
 #define LCD_RS PD0
 #define LCD_EN PD1
@@ -75,11 +76,13 @@ Customer customers[] = {
 // ============================================================================
 static volatile uint32_t system_ticks = 0;
 static uint32_t display_start_time = 0;
+static uint32_t current_display_duration = DISPLAY_DURATION_MS;
 static Ad current_ad;
 static uint8_t last_customer_id = 255;
 static uint8_t blink_toggle = 0;
 static uint8_t scroll_offset = 0;
 static uint8_t scroll_offset2 = 0;
+static uint32_t last_scroll_tick = 0;
 
 // ============================================================================
 // LCD DRIVRUTIN
@@ -124,6 +127,41 @@ void lcd_init(void) {
 
 void lcd_clear(void) { lcd_command(0x01); _delay_ms(2); }
 void lcd_print(const char* str) { while (*str) lcd_data(*str++); }
+
+void lcd_print_aligned(const char* str) {
+    size_t len = strlen(str);
+    size_t i;
+    for (i = 0; i < 16 && i < len; i++) {
+        lcd_data(str[i]);
+    }
+    for (; i < 16; i++) {
+        lcd_data(' ');
+    }
+}
+
+void lcd_print_scrolling(const char* str, uint8_t* offset, uint8_t loop) {
+    size_t len = strlen(str);
+    if (len <= 16) {
+        lcd_print_aligned(str);
+        return;
+    }
+
+    size_t scroll_len = len + 16;
+    if (system_ticks - last_scroll_tick >= SCROLL_STEP_MS) {
+        last_scroll_tick = system_ticks;
+        *offset = (*offset + 1) % scroll_len;
+    }
+
+    for (size_t i = 0; i < 16; i++) {
+        size_t pos = *offset + i;
+        if (pos < len) {
+            lcd_data(str[pos]);
+        } else {
+            lcd_data(' ');
+        }
+    }
+}
+
 void lcd_set_cursor(uint8_t col, uint8_t row) {
     uint8_t addr = (row == 0) ? 0x80 : 0xC0;
     lcd_command(addr + col);
@@ -181,27 +219,40 @@ void pick_next_ad(void) {
     current_ad.payment = c->payment;
     
     // Bestäm effekt
-    // Om texten är tom på rad 2, tvinga fram SCROLL för långa texter
-    if (c->id == 3 || c->id == 2) { 
-        // Petter och Farmor Anka ska alltid scrolla om texten är lång
+    if (c->id == 2) {
+        // Farmor Anka scrollar alltid
         current_ad.effect = EFFECT_SCROLL;
-    } else if (c->id == 3) { // Petter specialregel (även om vi tvingade scroll ovan)
+    } else if (c->id == 3) {
+        // Petter kan växla, men han ska fortfarande visa hela texten långsamt
         uint16_t minutes = (system_ticks / 1000) / 60;
         if (minutes % 2 == 0) current_ad.effect = EFFECT_SCROLL;
         else current_ad.effect = EFFECT_STATIC;
+    } else if (c->id == 0) {
+        current_ad.effect = EFFECT_STATIC;
+    } else if (c->id == 1) {
+        // Harry-annonser ska inte scrolla
+        current_ad.effect = (rand() % 2 == 0) ? EFFECT_STATIC : EFFECT_BLINK;
     } else {
-        if (c->id == 0) current_ad.effect = EFFECT_STATIC;
-        else {
-            uint8_t eff = rand() % 3;
-            current_ad.effect = (Effect)eff;
-        }
+        uint8_t eff = rand() % 3;
+        current_ad.effect = (Effect)eff;
     }
     
     last_customer_id = c->id;
     display_start_time = system_ticks;
     scroll_offset = 0;
     scroll_offset2 = 0;
+    last_scroll_tick = system_ticks;
     blink_toggle = 0;
+
+    size_t len1 = strlen(current_ad.line1);
+    size_t len2 = (current_ad.has_line2 ? strlen(current_ad.line2) : 0);
+    size_t max_len = len1 > len2 ? len1 : len2;
+    if (current_ad.effect == EFFECT_SCROLL && max_len > 16) {
+        uint32_t required = (uint32_t)(max_len + 16) * SCROLL_STEP_MS + 2000;
+        current_display_duration = required > DISPLAY_DURATION_MS ? required : DISPLAY_DURATION_MS;
+    } else {
+        current_display_duration = DISPLAY_DURATION_MS;
+    }
 }
 
 // ============================================================================
@@ -217,53 +268,35 @@ void render_display(void) {
     if (current_ad.effect == EFFECT_BLINK) {
         blink_toggle = !blink_toggle;
         if (blink_toggle) {
-            lcd_print(current_ad.line1);
+            lcd_print_aligned(current_ad.line1);
         } else {
-            for(int i=0; i<16; i++) lcd_data(' ');
+            for (int i = 0; i < 16; i++) lcd_data(' ');
         }
     } else if (current_ad.effect == EFFECT_SCROLL) {
-        uint8_t len = strlen(current_ad.line1);
-        
-        // Tvinga fram scrollning, oavsett längd (för test)
-        if ((system_ticks % 200) == 0) {
-            scroll_offset = (scroll_offset + 1) % len;
-        }
-        
-        for (uint8_t i = 0; i < 16; i++) {
-            uint8_t char_index = (scroll_offset + i) % len;
-            lcd_data(current_ad.line1[char_index]);
-        }
+        uint8_t loop = (current_ad.customer_id == 3) ? 0 : 1;
+        lcd_print_scrolling(current_ad.line1, &scroll_offset, loop);
     } else {
-        lcd_print(current_ad.line1);
+        lcd_print_aligned(current_ad.line1);
     }
 
     // --- RAD 2 ---
     lcd_set_cursor(0, 1);
     
     if (!current_ad.has_line2 || strlen(current_ad.line2) == 0) {
-        for(int i=0; i<16; i++) lcd_data(' ');
+        for (int i = 0; i < 16; i++) lcd_data(' ');
         return;
     }
 
     if (current_ad.effect == EFFECT_BLINK) {
         if (!blink_toggle) {
-            for(int i=0; i<16; i++) lcd_data(' ');
+            for (int i = 0; i < 16; i++) lcd_data(' ');
             return;
         }
-        lcd_print(current_ad.line2);
+        lcd_print_aligned(current_ad.line2);
     } else if (current_ad.effect == EFFECT_SCROLL) {
-        uint8_t len = strlen(current_ad.line2);
-        if (len > 0) {
-            if ((system_ticks % 200) == 0) {
-                scroll_offset2 = (scroll_offset2 + 1) % len;
-            }
-            for (uint8_t i = 0; i < 16; i++) {
-                uint8_t char_index = (scroll_offset2 + i) % len;
-                lcd_data(current_ad.line2[char_index]);
-            }
-        }
+        lcd_print_scrolling(current_ad.line2, &scroll_offset2, 1);
     } else {
-        lcd_print(current_ad.line2);
+        lcd_print_aligned(current_ad.line2);
     }
 }
 
@@ -278,11 +311,11 @@ void run_billboard_logic(void) {
     pick_next_ad();
     
     while (1) {
-        if (system_ticks - display_start_time >= DISPLAY_DURATION_MS) {
+        if (system_ticks - display_start_time >= current_display_duration) {
             pick_next_ad();
         }
         render_display();
-        _delay_ms(100);
+        _delay_ms(400);
     }
 }
 
