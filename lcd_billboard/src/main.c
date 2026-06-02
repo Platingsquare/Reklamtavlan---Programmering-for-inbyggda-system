@@ -28,7 +28,6 @@ typedef enum {
     EFFECT_BLINK
 } Effect;
 
-// Kundstruktur
 typedef struct {
     const char* line1;   
     const char* line2;   
@@ -37,42 +36,39 @@ typedef struct {
     uint8_t has_line2;   
 } Customer;
 
-// Annonsstruktur (NY: payment tillagd!)
 typedef struct {
     const char* line1;
     const char* line2;
     Effect effect;
     uint8_t customer_id;
     uint8_t has_line2;
-    uint32_t payment; // <-- Detta saknades tidigare och orsakade felet
+    uint32_t payment;
 } Ad;
 
 // ============================================================================
-// KUNDDB (HÄR SKRIVER DU EXAKT VAD SOM SKA STÅ PÅ VARJE RAD)
+// KUNDDB
 // ============================================================================
 Customer customers[] = {
     // 0: Internal (1000 kr)
     { "Synas har?", "IOT:s Reklambyra", 1000, 0, 1 },
     
     // 1: Harry (5000 kr) - 3 varianter
-    { "Kop bil at Harry", "En god bilaffar!", 5000, 1, 1 },
+    { "Kop bil hos Harry", "En god bilaffar!", 5000, 1, 1 },
     { "En god bilaffar!", "For Harry!", 5000, 1, 1 },
     { "Hederlige Harrys", "Bilar", 5000, 1, 1 },
     
-    // 2: Farmor Anka (3000 kr)
-    { "Kop paj hos", "Farmor Anka!", 3000, 2, 1 },
-    { "Skynda innan", "Marten at alla!", 3000, 2, 1 },
+    // 2: Farmor Anka (3000 kr) - UPPDATERAD TEXT
+    { "Kop paj hos farmor anka", "", 3000, 2, 0 }, // has_line2 = 0 för att bara ha en lång rad som scrollar
     
-    // 3: Svarte Petter (1500 kr)
-    { "Let Petter bygga", "at dig!", 1500, 3, 1 },
-    { "Bygga svart?", "Ring Petter!", 1500, 3, 1 },
+    // 3: Svarte Petter (1500 kr) - UPPDATERAD TEXT
+    { "Let Petter bygga at dig", "", 1500, 3, 0 }, // has_line2 = 0 för att bara ha en lång rad som scrollar
     
     // 4: Langben (4000 kr)
-    { "Mysterier?", "Ring Langben!", 4000, 4, 1 },
+    { "Mysterier? Ring", "Langben!", 4000, 4, 1 },
     { "Langben fixar", "biffen!", 4000, 4, 1 }
 };
 
-#define NUM_SCENARIOS 10 
+#define NUM_SCENARIOS 8 
 
 // ============================================================================
 // GLOBALT TILLSTAND
@@ -83,7 +79,7 @@ static Ad current_ad;
 static uint8_t last_customer_id = 255;
 static uint8_t blink_toggle = 0;
 static uint8_t scroll_offset = 0;
-static uint8_t scroll_offset2 = 0; // För rad 2 scroll
+static uint8_t scroll_offset2 = 0;
 
 // ============================================================================
 // LCD DRIVRUTIN
@@ -182,10 +178,14 @@ void pick_next_ad(void) {
     current_ad.line2 = c->line2;
     current_ad.has_line2 = c->has_line2;
     current_ad.customer_id = c->id;
-    current_ad.payment = c->payment; // Nu fungerar detta!
+    current_ad.payment = c->payment;
     
     // Bestäm effekt
-    if (c->id == 3) { // Petter
+    // Om texten är tom på rad 2, tvinga fram SCROLL för långa texter
+    if (c->id == 3 || c->id == 2) { 
+        // Petter och Farmor Anka ska alltid scrolla om texten är lång
+        current_ad.effect = EFFECT_SCROLL;
+    } else if (c->id == 3) { // Petter specialregel (även om vi tvingade scroll ovan)
         uint16_t minutes = (system_ticks / 1000) / 60;
         if (minutes % 2 == 0) current_ad.effect = EFFECT_SCROLL;
         else current_ad.effect = EFFECT_STATIC;
@@ -206,7 +206,7 @@ void pick_next_ad(void) {
 
 // ============================================================================
 // VISUALISERING
-// ============================================================================
+// ============================================================================// ... (resten av koden är samma) ...
 
 void render_display(void) {
     lcd_clear();
@@ -223,12 +223,15 @@ void render_display(void) {
         }
     } else if (current_ad.effect == EFFECT_SCROLL) {
         uint8_t len = strlen(current_ad.line1);
-        if ((system_ticks % 300) == 0) {
-            scroll_offset = (scroll_offset + 1) % (len > 16 ? len : 1);
+        
+        // Tvinga fram scrollning, oavsett längd (för test)
+        if ((system_ticks % 200) == 0) {
+            scroll_offset = (scroll_offset + 1) % len;
         }
+        
         for (uint8_t i = 0; i < 16; i++) {
-            if (scroll_offset + i < len) lcd_data(current_ad.line1[scroll_offset + i]);
-            else lcd_data(' ');
+            uint8_t char_index = (scroll_offset + i) % len;
+            lcd_data(current_ad.line1[char_index]);
         }
     } else {
         lcd_print(current_ad.line1);
@@ -237,7 +240,7 @@ void render_display(void) {
     // --- RAD 2 ---
     lcd_set_cursor(0, 1);
     
-    if (!current_ad.has_line2) {
+    if (!current_ad.has_line2 || strlen(current_ad.line2) == 0) {
         for(int i=0; i<16; i++) lcd_data(' ');
         return;
     }
@@ -250,12 +253,14 @@ void render_display(void) {
         lcd_print(current_ad.line2);
     } else if (current_ad.effect == EFFECT_SCROLL) {
         uint8_t len = strlen(current_ad.line2);
-        if ((system_ticks % 300) == 0) {
-            scroll_offset2 = (scroll_offset2 + 1) % (len > 16 ? len : 1);
-        }
-        for (uint8_t i = 0; i < 16; i++) {
-            if (scroll_offset2 + i < len) lcd_data(current_ad.line2[scroll_offset2 + i]);
-            else lcd_data(' ');
+        if (len > 0) {
+            if ((system_ticks % 200) == 0) {
+                scroll_offset2 = (scroll_offset2 + 1) % len;
+            }
+            for (uint8_t i = 0; i < 16; i++) {
+                uint8_t char_index = (scroll_offset2 + i) % len;
+                lcd_data(current_ad.line2[char_index]);
+            }
         }
     } else {
         lcd_print(current_ad.line2);
